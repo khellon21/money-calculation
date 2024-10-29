@@ -8,6 +8,8 @@ import openpyxl
 from openpyxl import Workbook
 import os
 import webbrowser  # Make sure to import webbrowser at the top
+import tkinter.ttk as ttk  # Import ttk for Treeview
+import time  # Import time to handle the lockout duration
 
 def login():
     form = LoginForm()
@@ -46,22 +48,28 @@ class CreateAccountWindow:
         self.password_entry = tk.Entry(master, show="*")
         self.password_entry.pack()
 
+        self.security_code_label = tk.Label(master, text="Security Code:")
+        self.security_code_label.pack()
+        self.security_code_entry = tk.Entry(master, show="*")
+        self.security_code_entry.pack()
+
         self.create_button = tk.Button(master, text="Create Account", command=self.create_account)
         self.create_button.pack(pady=10)
 
     def create_account(self):
         username = self.username_entry.get()
         password = self.password_entry.get()
+        security_code = self.security_code_entry.get()  # New line to get security code
 
-        if username and password:
+        if username and password and security_code:  # Updated condition to check security code
             if self.login_window.account_exists(username):
                 messagebox.showerror("Account Creation Failed", "Username already exists")
             else:
-                self.login_window.add_account(username, password)
+                self.login_window.add_account(username, password, security_code)  # Pass security code
                 messagebox.showinfo("Account Created", "Your account has been created successfully")
                 self.master.destroy()  # Close the create account window
         else:
-            messagebox.showerror("Account Creation Failed", "Please enter both username and password")
+            messagebox.showerror("Account Creation Failed", "Please enter username, password, and security code")
 
 class LoginWindow:
     def __init__(self, master):
@@ -95,8 +103,24 @@ class LoginWindow:
         if not os.path.exists(self.accounts_file):
             wb = Workbook()
             ws = wb.active
-            ws.append(["Username", "Password"])
+            ws.append(["Username", "Password", "Security Code"])  # Ensure Security Code column exists
             wb.save(self.accounts_file)
+        else:
+            # Attempt to open the existing file to check for corruption
+            try:
+                wb = openpyxl.load_workbook(self.accounts_file)
+                ws = wb.active
+                # Check if the expected headers are present
+                headers = [cell.value for cell in ws[1]]
+                if headers != ["Username", "Password", "Security Code"]:
+                    raise ValueError("Corrupted file: headers do not match expected format.")
+            except Exception as e:
+                messagebox.showerror("Error", f"Accounts file is corrupted: {e}. A new file will be created.")
+                # Create a new file if the existing one is corrupted
+                wb = Workbook()
+                ws = wb.active
+                ws.append(["Username", "Password", "Security Code"])  # Ensure Security Code column exists
+                wb.save(self.accounts_file)
 
     def account_exists(self, username):
         wb = openpyxl.load_workbook(self.accounts_file)
@@ -106,11 +130,11 @@ class LoginWindow:
                 return True
         return False
 
-    def add_account(self, username, password):
+    def add_account(self, username, password, security_code):  # Updated method signature
         wb = openpyxl.load_workbook(self.accounts_file)
         ws = wb.active
-        ws.append([username, password])
-        wb.save(self.accounts_file)
+        ws.append([username, password, security_code])  # Save security code in the same row
+        wb.save(self.accounts_file)  # Ensure the workbook is saved after adding the account
 
     def login(self):
         username = self.username_entry.get()
@@ -136,18 +160,50 @@ class LoginWindow:
 
     def open_money_management(self, username):
         root = tk.Tk()
-        app = MoneyManagementApp(root, username)
+        app = MoneyManagementApp(root, username, self.accounts_file)  # Pass accounts_file here
         root.mainloop()
 
     def reset_password(self):
         username = simpledialog.askstring("Reset Password", "Enter your username:")
         if username and self.account_exists(username):
-            new_password = simpledialog.askstring("Reset Password", "Enter your new password:", show="*")
-            if new_password:
-                self.update_password(username, new_password)
-                messagebox.showinfo("Success", "Password has been reset successfully.")
+            attempts = 0
+            lockout_time = None
+            
+            while True:  # Loop until the user successfully resets the password or is locked out
+                if lockout_time and time.time() < lockout_time:
+                    # User is still locked out
+                    remaining_time = int(lockout_time - time.time())
+                    messagebox.showwarning("Locked Out", f"You are locked out. Please try again in {remaining_time} seconds.")
+                    time.sleep(remaining_time)  # Wait until lockout period is over
+                    lockout_time = None  # Reset lockout time after waiting
+
+                security_code = simpledialog.askstring("Security Code", "Enter your 4-digit security code:")
+                if self.verify_security_code(username, security_code):
+                    new_password = simpledialog.askstring("Reset Password", "Enter your new password:", show="*")
+                    if new_password:
+                        self.update_password(username, new_password)
+                        messagebox.showinfo("Success", "Password has been reset successfully.")
+                    return  # Exit the method after successful password reset
+                else:
+                    attempts += 1
+                    messagebox.showerror("Error", f"Invalid security code. You have {3 - attempts} attempts left.")
+                    
+                    if attempts >= 3:
+                        # Lockout logic
+                        lockout_time = time.time() + 600  # 10 minutes lockout
+                        messagebox.showwarning("Locked Out", "Too many failed attempts. You are locked out for 10 minutes.")
+                        break  # Exit the loop after locking out the user
         else:
             messagebox.showerror("Error", "Username does not exist.")
+
+    def verify_security_code(self, username, security_code):
+        wb = openpyxl.load_workbook(self.accounts_file)
+        ws = wb.active
+        for row in ws.iter_rows(min_row=2):
+            if row[0].value == username:  # Check if the username matches
+                if len(row) > 2 and row[2].value == security_code:  # Check if the security code exists and matches
+                    return True
+        return False
 
     def update_password(self, username, new_password):
         wb = openpyxl.load_workbook(self.accounts_file)
@@ -158,13 +214,28 @@ class LoginWindow:
                 break
         wb.save(self.accounts_file)  # Save changes to the file
 
+    def save_security_code(self, security_code):
+        wb = openpyxl.load_workbook(self.accounts_file)
+        ws = wb.active
+        for row in ws.iter_rows(min_row=2):
+            if row[0].value == self.username:  # Match the username
+                if len(row) > 2:  # Check if the row has at least 3 columns
+                    row[2].value = security_code  # Update the security code in the third column
+                else:
+                    messagebox.showerror("Error", "User data is corrupted. Please check the accounts file.")
+                break
+        else:
+            messagebox.showerror("Error", "Username not found.")
+        wb.save(self.accounts_file)  # Save changes to the file
+
 class MoneyManagementApp:
-    def __init__(self, master, username):
+    def __init__(self, master, username, accounts_file):  # Add accounts_file as a parameter
         self.master = master
         self.master.title("Money Management")
-        self.master.geometry("600x700")  # Increased height to accommodate the username
-
+        self.master.geometry("600x700")
+        
         self.username = username
+        self.accounts_file = accounts_file  # Set the accounts_file attribute
         self.balance = 0
         self.transactions = []
         self.income = {}
@@ -216,6 +287,10 @@ class MoneyManagementApp:
         self.username_label = tk.Label(master, text=f"copyright to khellon patel™® © ",font=("Arial", 8))
         self.username_label.pack(pady=50)
 
+        # Add Security Code button
+        self.security_code_button = tk.Button(master, text="Set Security Code", command=self.set_security_code)
+        self.security_code_button.pack(pady=10)
+
     def add_income(self):
         self.add_transaction(True)
 
@@ -240,7 +315,7 @@ class MoneyManagementApp:
                     self.income[category] = self.income.get(category, 0) + amount
             else:
                 self.balance -= amount
-                transaction_type = "Expense"
+                transaction_type = "Expense"  # Fixed line
                 category = simpledialog.askstring("Category", "Enter expense category:")
                 if category:
                     self.expenses[category] = self.expenses.get(category, 0) + amount
@@ -346,7 +421,7 @@ class MoneyManagementApp:
             messagebox.showinfo("Reset Complete", "All data has been reset and the chart window has been closed.")
 
     def open_instagram(self):
-        webbrowser.open("https://www.instagram.com/khellon_patel_21?igsh=ZW9rZWU3ZTZodGxv")  # Replace with your actual Instagram link
+        webbrowser.open("https://www.instagram.com/khellon_patel_21")  # Replace with your actual Instagram link
 
     def logout(self):
         # Logic to return to the login screen
@@ -354,6 +429,28 @@ class MoneyManagementApp:
         main()
         
         
+    def set_security_code(self):
+        security_code = simpledialog.askstring("Security Code", "Enter a 4-digit security code:")
+        if security_code and len(security_code) == 4 and security_code.isdigit():
+            self.save_security_code(security_code)
+            messagebox.showinfo("Success", "Security code has been set successfully.")
+        else:
+            messagebox.showerror("Error", "Please enter a valid 4-digit code.")
+
+    def save_security_code(self, security_code):
+        wb = openpyxl.load_workbook(self.accounts_file)
+        ws = wb.active
+        for row in ws.iter_rows(min_row=2):
+            if row[0].value == self.username:  # Match the username
+                if len(row) > 2:  # Check if the row has at least 3 columns
+                    row[2].value = security_code  # Update the security code in the third column
+                else:
+                    messagebox.showerror("Error", "User data is corrupted. Please check the accounts file.")
+                break
+        else:
+            messagebox.showerror("Error", "Username not found.")
+        wb.save(self.accounts_file)  # Save changes to the file
+
 def main():
     login_root = tk.Tk()
     login_app = LoginWindow(login_root)
